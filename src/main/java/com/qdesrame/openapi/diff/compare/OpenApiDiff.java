@@ -8,6 +8,7 @@ import com.qdesrame.openapi.diff.utils.EndpointUtils;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
+import io.swagger.v3.oas.models.Paths;
 import io.swagger.v3.oas.models.security.SecurityRequirement;
 import io.swagger.v3.parser.OpenAPIV3Parser;
 import io.swagger.v3.parser.core.models.AuthorizationValue;
@@ -15,14 +16,16 @@ import io.swagger.v3.parser.core.models.ParseOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class OpenApiDiff {
 
     public static final String SWAGGER_VERSION_V2 = "2.0";
+    private static final String REGEX_PATH = "\\{([^/]+)\\}";
+    private static final Pattern pathParamPattern = Pattern.compile(REGEX_PATH);
 
     private static Logger logger = LoggerFactory.getLogger(OpenApiDiff.class);
 
@@ -129,6 +132,7 @@ public class OpenApiDiff {
     private ChangedOpenApi compare() {
         preProcess(oldSpecOpenApi);
         preProcess(newSpecOpenApi);
+        normalizePathParams(oldSpecOpenApi, newSpecOpenApi);
         Map<String, PathItem> oldPaths = oldSpecOpenApi.getPaths();
         Map<String, PathItem> newPaths = newSpecOpenApi.getPaths();
         MapKeyDiff<String, PathItem> pathDiff = MapKeyDiff.diff(oldPaths, newPaths);
@@ -162,6 +166,49 @@ public class OpenApiDiff {
         }
 
         return getChangedOpenApi();
+    }
+
+    private void normalizePathParams(OpenAPI oldSpecOpenApi, OpenAPI newSpecOpenApi) {
+        Paths newPaths = newSpecOpenApi.getPaths();
+        for (String oldPathUrl : oldSpecOpenApi.getPaths().keySet()) {
+            Optional<String> foundNewPathUrl = newPaths.keySet().stream()
+                    .filter(newPathUrl -> normalizePath(newPathUrl).equals(normalizePath(oldPathUrl))).findFirst();
+            foundNewPathUrl.ifPresent(newPathUrl -> {
+                List<String> oldParams = extractParameters(oldPathUrl);
+                List<String> newParams = extractParameters(newPathUrl);
+                Map<String, String> newParamToOldParamMap = new HashMap<>();
+                for (int i = 0; i < oldParams.size(); i++) {
+                    if (!newParams.get(i).equals(oldParams.get(i))) {
+                        newParamToOldParamMap.put(newParams.get(i), oldParams.get(i));
+                    }
+                }
+
+                PathItem pathItem = newPaths.get(newPathUrl);
+                newPaths.remove(newPathUrl);
+                newPaths.put(oldPathUrl, pathItem);
+
+                pathItem.readOperations().stream().filter(operation -> operation.getParameters() != null)
+                        .forEach(operation -> operation.getParameters()
+                        .stream()
+                        .filter(p -> p.getIn().equals("path") && newParamToOldParamMap.containsKey(p.getName()))
+                        .forEach(parameter -> parameter.setName(newParamToOldParamMap.get(parameter.getName())))
+                );
+            });
+        }
+
+    }
+
+    private String normalizePath(String path) {
+        return path.replaceAll(REGEX_PATH, "{}");
+    }
+
+    private List<String> extractParameters(String path) {
+        ArrayList<String> params = new ArrayList<>();
+        Matcher matcher = pathParamPattern.matcher(path);
+        while (matcher.find()) {
+            params.add(matcher.group(1));
+        }
+        return params;
     }
 
     private void preProcess(OpenAPI openApi) {
